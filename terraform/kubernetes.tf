@@ -4,7 +4,7 @@
 # ---------------------------------------------------------------------------
 resource "kubernetes_namespace_v1" "this" {
   metadata {
-    name   = var.namespace
+    name = var.namespace
     labels = {
       "pod-security.kubernetes.io/enforce"         = "restricted"
       "pod-security.kubernetes.io/enforce-version" = "latest"
@@ -16,8 +16,8 @@ resource "kubernetes_namespace_v1" "this" {
 
 resource "kubernetes_service_account_v1" "api" {
   metadata {
-    name        = local.service_account
-    namespace   = kubernetes_namespace_v1.this.metadata[0].name
+    name      = local.service_account
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
     annotations = {
       "eks.amazonaws.com/role-arn" = aws_iam_role.api.arn
     }
@@ -36,12 +36,12 @@ resource "kubernetes_manifest" "secret_provider_class" {
   manifest = {
     apiVersion = "secrets-store.csi.x-k8s.io/v1"
     kind       = "SecretProviderClass"
-    metadata   = {
+    metadata = {
       name      = "${local.name}-secrets"
       namespace = kubernetes_namespace_v1.this.metadata[0].name
     }
     spec = {
-      provider   = "aws"
+      provider = "aws"
       parameters = {
         objects = yamlencode([
           { objectName = aws_secretsmanager_secret.jwt_signing_key.arn, objectAlias = "jwt_secret_key" },
@@ -187,8 +187,8 @@ resource "kubernetes_deployment_v1" "api" {
         volume {
           name = "secrets"
           csi {
-            driver            = "secrets-store.csi.k8s.io"
-            read_only         = true
+            driver    = "secrets-store.csi.k8s.io"
+            read_only = true
             volume_attributes = {
               secretProviderClass = kubernetes_manifest.secret_provider_class.manifest.metadata.name
             }
@@ -337,8 +337,8 @@ resource "kubernetes_network_policy_v1" "api" {
 # ---------------------------------------------------------------------------
 resource "kubernetes_ingress_v1" "api" {
   metadata {
-    name        = local.name
-    namespace   = kubernetes_namespace_v1.this.metadata[0].name
+    name      = local.name
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
     annotations = {
       "cert-manager.io/cluster-issuer"                     = var.cert_manager_cluster_issuer
       "nginx.ingress.kubernetes.io/ssl-redirect"           = "true"
