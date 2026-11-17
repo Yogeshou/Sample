@@ -148,3 +148,35 @@ def test_delete_scan():
 
     resp = client.delete(f"/scans/{scan_id}", headers=auth_headers(token))
     assert resp.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# Shared report links
+# ---------------------------------------------------------------------------
+
+def _create_scan(token, title="Shared finding"):
+    return client.post("/scans", json={
+        "title": title, "severity": "high", "affected_component": "api",
+    }, headers=auth_headers(token)).json()["id"]
+
+
+def test_share_link_roundtrip():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    resp = client.post(f"/scans/{scan_id}/share", json={}, headers=auth_headers(token))
+    assert resp.status_code == 201
+    share_token = resp.json()["share_url"].rsplit("/", 1)[-1]
+    resp = client.get(f"/share/{share_token}")
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Shared finding"
+
+
+def test_share_link_password():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    url = client.post(f"/scans/{scan_id}/share", json={"password": "correct-horse"},
+                      headers=auth_headers(token)).json()["share_url"]
+    share_token = url.rsplit("/", 1)[-1]
+    assert client.get(f"/share/{share_token}").status_code == 401
+    assert client.get(f"/share/{share_token}", params={"password": "nope-nope"}).status_code == 401
+    assert client.get(f"/share/{share_token}", params={"password": "correct-horse"}).status_code == 200
