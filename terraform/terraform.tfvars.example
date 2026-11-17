@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Contains no secrets.
+cluster_name      = "platform-prod"
+aws_region        = "ap-south-1"
+environment       = "prod"
+image             = "123456789012.dkr.ecr.ap-south-1.amazonaws.com/vulntracker-api@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+public_hostname   = "vulntracker.example.com"
+oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.ap-south-1.amazonaws.com/id/EXAMPLE"
+oidc_provider_url = "oidc.eks.ap-south-1.amazonaws.com/id/EXAMPLE"

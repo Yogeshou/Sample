@@ -1,0 +1,7 @@
+# Build context allow-list: only what the image needs.
+*
+!app/
+!requirements.lock
+app/__pycache__/
+app/**/*.pyc
+app/*.db
