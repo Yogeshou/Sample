@@ -24,7 +24,7 @@ FROM python:3.11.18-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769
 
 LABEL org.opencontainers.image.title="vulntracker-api" \
       org.opencontainers.image.description="VulnTracker REST API" \
-      org.opencontainers.image.source="https://github.com/<your-username>/<your-repo>" \
+      org.opencontainers.image.source="https://github.com/Yogeshou/Sample" \
       org.opencontainers.image.licenses="Proprietary"
 
 # Pull in Debian security fixes released since the upstream base was built,
