@@ -95,7 +95,7 @@ jobs:
         run: |
           bandit -r app -f json -o reports/sast.bandit.json || true
           bandit -r app --severity-level high --confidence-level high
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sast.semgrep.json
@@ -132,7 +132,7 @@ jobs:
         run: |
           npm audit --json > ../reports/sca.npm-audit.json || true
           npm audit --audit-level=high
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sca.pip-audit.json
@@ -191,7 +191,7 @@ jobs:
           format: table
           exit-code: "1"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: container.trivy.json
@@ -225,7 +225,7 @@ jobs:
           checkov -d terraform --framework terraform --skip-download -o json --soft-fail > reports/iac.checkov.json
           checkov -d terraform --framework terraform --skip-download --compact --soft-fail-on CKV2_AWS_57
           checkov -f Dockerfile --framework dockerfile --skip-download --compact
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: iac.checkov.json
