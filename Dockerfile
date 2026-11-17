@@ -9,7 +9,7 @@
 # raise digest-bump PRs and scanners can resolve it.
 # ---------------------------------------------------------------------------
 # ---- build stage -----------------------------------------------------------
-FROM python:3.11.18-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS build
+FROM python:3.15.0-slim-trixie@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS build
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -20,7 +20,7 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/python -m pip uninstall -y pip setuptools wheel
 
 # ---- runtime stage ---------------------------------------------------------
-FROM python:3.11.18-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS runtime
+FROM python:3.15.0-slim-trixie@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS runtime
 
 LABEL org.opencontainers.image.title="vulntracker-api" \
       org.opencontainers.image.description="VulnTracker REST API" \
