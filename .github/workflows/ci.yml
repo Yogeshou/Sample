@@ -6,60 +6,227 @@ on:
   pull_request:
     branches: ["**"]
 
+# Least privilege for every job's GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Third-party actions are pinned to full commit SHAs (tags are mutable and have
+# been hijacked in real supply-chain attacks). Dependabot keeps them current.
+env:
+  SEMGREP_VERSION: "1.185.0"
+  BANDIT_VERSION: "1.9.4"
+  PIP_AUDIT_VERSION: "2.10.1"
+  CHECKOV_VERSION: "3.4.5"
+  TRIVY_VERSION: "v0.76.2"
+
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Run tests
         run: pytest tests/ -v
 
   test-notify:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install dependencies (lockfile, no lifecycle scripts)
+        run: npm ci --ignore-scripts
         working-directory: notify
 
       - name: Run tests
         run: npm test
         working-directory: notify
 
-  # TODO (candidates): Add the following security scanning jobs.
-  # Tool selection is your decision — document your choices in findings.md.
-  #
-  # sast:
-  #   Static Application Security Testing against app/ source code
-  #   Upload JSON report as a build artifact named sast.<tool>.json
-  #   Build should fail on critical findings
-  #
-  # sca:
-  #   Dependency / Software Composition Analysis against requirements.txt
-  #   Upload JSON report as a build artifact named sca.<tool>.json
-  #   Build should fail on critical or high severity CVEs
-  #
-  # container-scan:
-  #   Build the Docker image, then scan it for vulnerabilities and misconfigurations
-  #   Upload JSON report as a build artifact named container.<tool>.json
-  #
-  # iac-scan:
-  #   Scan the Helm chart or Terraform configuration for security misconfigurations
-  #   Upload JSON report as a build artifact named iac.<tool>.json
+  # ---------------------------------------------------------------------------
+  # SAST - Semgrep (multi-language: Python + JS, OWASP + secrets rules) and
+  # Bandit (Python-specific). Build fails on ERROR-severity (critical) Semgrep
+  # results and on HIGH-severity/HIGH-confidence Bandit results.
+  # ---------------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install scanners
+        run: pip install "semgrep==${SEMGREP_VERSION}" "bandit==${BANDIT_VERSION}"
+      - name: Semgrep
+        run: |
+          mkdir -p reports
+          semgrep scan --metrics=off \
+            --config p/python --config p/javascript --config p/owasp-top-ten --config p/secrets \
+            --config .semgrep/ \
+            --json --output reports/sast.semgrep.json \
+            app notify/src
+          # gate: fail only on ERROR (critical) severity
+          semgrep scan --metrics=off --quiet \
+            --config p/python --config p/javascript --config p/owasp-top-ten --config p/secrets \
+            --config .semgrep/ \
+            --severity ERROR --error app notify/src
+      - name: Bandit
+        run: |
+          bandit -r app -f json -o reports/sast.bandit.json || true
+          bandit -r app --severity-level high --confidence-level high
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sast.semgrep.json
+          path: |
+            reports/sast.semgrep.json
+            reports/sast.bandit.json
+
+  # ---------------------------------------------------------------------------
+  # SCA - pip-audit (PyPA/OSV advisories) against the hash-locked runtime set,
+  # npm audit for the notify service. Any known vulnerability with a fix fails
+  # the Python build; npm fails on high/critical.
+  # ---------------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - name: Install pip-audit
+        run: pip install "pip-audit==${PIP_AUDIT_VERSION}"
+      - name: pip-audit (Python)
+        run: |
+          mkdir -p reports
+          pip-audit -r requirements-dev.txt -f json -o reports/sca.pip-audit.json
+      - name: npm audit (notify)
+        if: always()
+        working-directory: notify
+        run: |
+          npm audit --json > ../reports/sca.npm-audit.json || true
+          npm audit --audit-level=high
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sca.pip-audit.json
+          path: reports/sca.*.json
+
+  # ---------------------------------------------------------------------------
+  # Container - build, smoke-test (non-root, healthcheck, /health reachable),
+  # then Trivy: OS + library CVEs, Dockerfile misconfig, embedded secrets.
+  # Fails on fixable HIGH/CRITICAL.
+  # ---------------------------------------------------------------------------
+  container-scan:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build --pull -t vulntracker-api:ci .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name api -p 8000:8000 --read-only --tmpfs /tmp \
+            --tmpfs /app/data:uid=10001,gid=10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -e JWT_SECRET_KEY="$(openssl rand -base64 48)" vulntracker-api:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:8000/health && break; sleep 1; done
+          curl -fsS http://localhost:8000/health
+          test "$(docker inspect --format '{{.Config.User}}' vulntracker-api:ci)" = "10001:10001"
+          for i in $(seq 1 30); do
+            s="$(docker inspect --format '{{.State.Health.Status}}' api)"; [ "$s" = "healthy" ] && break; sleep 3
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' api)" = "healthy"
+          docker logs api
+          docker rm -f api
+
+      - name: Trivy - full JSON report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: vulntracker-api:ci
+          scanners: vuln,secret,misconfig
+          format: json
+          output: reports/container.trivy.json
+          exit-code: "0"
+
+      - name: Trivy - gate on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: vulntracker-api:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: container.trivy.json
+          path: reports/container.trivy.json
+
+  # ---------------------------------------------------------------------------
+  # IaC - terraform fmt/validate + Checkov. Secret-rotation (CKV2_AWS_57) is a
+  # documented, time-boxed risk acceptance (docs/remediation-plan.md) so it is
+  # reported but does not fail the build; every other failed check does.
+  # ---------------------------------------------------------------------------
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - name: terraform fmt / validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Checkov
+        run: |
+          pip install "checkov==${CHECKOV_VERSION}"
+          mkdir -p reports
+          checkov -d terraform --framework terraform --skip-download -o json --soft-fail > reports/iac.checkov.json
+          checkov -d terraform --framework terraform --skip-download --compact --soft-fail-on CKV2_AWS_57
+          checkov -f Dockerfile --framework dockerfile --skip-download --compact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: iac.checkov.json
+          path: reports/iac.checkov.json

@@ -1,8 +1,11 @@
 // All secrets come from the environment (populated from a secrets manager in
 // Kubernetes). Nothing sensitive is committed to source control.
+const fs = require('fs');
+
 function readSecret(name) {
-  const fs = require('fs');
   const file = process.env[`${name}_FILE`];
+  // Path comes from operator-controlled deployment config, not user input.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-fs-filename.detect-non-literal-fs-filename
   if (file) return fs.readFileSync(file, 'utf8').trim();
   return process.env[name];
 }
