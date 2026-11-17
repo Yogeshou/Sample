@@ -1,217 +1,142 @@
-# Security Automation Engineer — Take-Home Assignment
+# VulnTracker: Security Automation Take-Home (Solution)
 
-Welcome. This assignment is designed to reflect the real work of a Lead Security Automation Engineer: extending an existing service, identifying and assessing security risks, remediating them with code, and deploying it securely. There are no trick questions — we are evaluating your depth of knowledge, your judgment under constraints, and your ability to communicate risk.
+Solution to the [Lead Security Automation Engineer assignment](https://github.com/cloudtriquetra/asa-assignment). The original brief is preserved in [`docs/ASSIGNMENT.md`](docs/ASSIGNMENT.md).
 
-**Estimated time: 4–6 hours.** We respect your time. If you find yourself going significantly over, scope down rather than rushing.
+| Deliverable | Where |
+|---|---|
+| Task 1: Shared Report Link feature | `app/main.py` (section *Shared report links*), `app/models.py` (`ShareLink`), tests in `tests/test_api.py` |
+| Task 2a: Scan reports | [`reports/`](reports/README.md): baseline + post-remediation |
+| Task 2b: Prioritised findings | [`docs/findings.md`](docs/findings.md) |
+| Task 3: Remediation and plan | Git history (one commit per fix area) + [`docs/remediation-plan.md`](docs/remediation-plan.md) |
+| Task 4: Dockerfile and IaC | [`Dockerfile`](Dockerfile), [`terraform/`](terraform/) |
+| Task 5: Executive summary | [`docs/executive-summary.md`](docs/executive-summary.md) |
+| CI security gates | [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.semgrep/`](.semgrep/), [`.github/dependabot.yml`](.github/dependabot.yml) |
+
+Read the commits in order (`git log --reverse`). The MVP feature commit comes first, then each security fix as its own commit, so the diff for every remediation is easy to review.
 
 ---
 
-## Background
+## Running locally
 
-**VulnTracker** is a two-service system for managing vulnerability scan results:
+**Requirements:** Python 3.11, Node.js 20+, Docker.
 
-- **`app/`** — Python/FastAPI REST API. Security teams use it to log findings, track remediation, and share reports with stakeholders.
-- **`notify/`** — Node.js/Express notification service. Intended to dispatch webhook events to registered endpoints when scan records are created or updated.
-
-Both services are working but imperfect internal prototypes. Neither has gone through a formal security review. The Python API calls the notification service in the background whenever a scan is created or updated — start both services to see the full flow.
-
----
-
-## Getting Started
-
-**Create your own repository for this assignment.** Do not fork — your solution must be in a fresh repo. You may use the starter code as a base, but your work must be in your own repo.
+### Python API (`app/`)
 
 ```bash
-# 1. Clone the assignment repo locally
-git clone https://github.com/cloudtriquetra/asa-assignment.git
-cd asa-assignment
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt          # runtime deps + pytest
 
-# 2. Point it at your own new GitHub repo (create one first at github.com)
-git remote set-url origin https://github.com/<your-username>/<your-repo>.git
-git push -u origin main
+# The app fails closed in production mode if no signing key is configured.
+export APP_ENV=development                   # enables /docs; ephemeral JWT key if none set
+export JWT_SECRET_KEY="$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
+export PUBLIC_BASE_URL=http://localhost:8000 # base for share links (never taken from Host header)
+
+cd app && uvicorn main:app --reload
 ```
 
-From here, work on your own repo and share its URL when you submit.
-
-**Requirements:** Python 3.11 (exactly — see CI), Node.js 20+, Docker
-
-**Python API (`app/`)**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-The API must be started from inside the `app/` directory — the modules use bare imports and won't resolve from the repo root:
-
-```bash
-cd app
-uvicorn main:app --reload
-```
-
-Available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
-
-Run the Python test suite from the **repo root**:
+Run tests from the repo root:
 
 ```bash
 pytest tests/ -v
 ```
 
-**Notification Service (`notify/`)**
+### Notification service (`notify/`)
 
 ```bash
 cd notify
-npm install
+npm ci
+export NOTIFY_API_KEY="$(openssl rand -hex 32)"   # required; the API sends it as a bearer token
+export ALLOW_INSECURE_WEBHOOKS=true               # dev only: permit http:// webhook targets
 npm start
+npm test                                          # stop the service first (same port)
 ```
 
-Available at `http://localhost:3001`.
+To let the API call notify, export the same `NOTIFY_API_KEY` in the API's shell.
 
-Run the Node.js test suite (stop the notify service first if it is running — the test suite starts its own server on the same port):
+### Configuration reference
+
+Any secret can be supplied as `NAME` (env var) or `NAME_FILE` (path to a file, which is how Kubernetes mounts it from the secrets manager).
+
+| Variable | Service | Purpose | Default |
+|---|---|---|---|
+| `APP_ENV` | API | `production` \| `development` \| `test` | `production` (fails closed) |
+| `JWT_SECRET_KEY[_FILE]` | API | HS256 signing key, ≥ 32 chars | **required in production** |
+| `DATABASE_URL[_FILE]` | API | SQLAlchemy URL | `sqlite:///./vulntracker.db` |
+| `PUBLIC_BASE_URL` | API | Base for generated share links | `http://localhost:8000` |
+| `CORS_ALLOWED_ORIGINS` | API | Comma-separated browser origins | empty (CORS off) |
+| `NOTIFY_SERVICE_URL` / `NOTIFY_API_KEY[_FILE]` | API | Where and how to call notify | `http://localhost:3001` / none |
+| `SHARE_LINK_MAX_FAILED_ATTEMPTS` | API | Bad passwords before a link locks | `10` |
+| `NOTIFY_API_KEY[_FILE]` | notify | Bearer key required on all routes except `/health` | **required** |
+| `WEBHOOK_SIGNING_SECRET[_FILE]` | notify | HMAC key for `X-VulnTracker-Signature` | falls back to API key |
+| `ALLOW_INSECURE_WEBHOOKS` | notify | Allow `http://` targets (dev/test only) | `false` |
+
+---
+
+## Shared Report Link (Task 1)
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `POST` | `/scans/{scan_id}/share` | Bearer | Body `{"password": "optional, 8–128 chars"}` → `201 {"share_url", "expires_at", "password_protected"}`. Only the scan owner can share it. |
+| `GET` | `/share/{token}` | Public | Returns a minimised view of the scan. If the link is password-protected, send `X-Share-Password: <pw>` (preferred) or `?password=<pw>` (per spec). |
+| `DELETE` | `/scans/{scan_id}/share` | Bearer | Revokes all active links for the scan. *(Added.)* |
+
+**`share_url` decision:** built from the configured `PUBLIC_BASE_URL` (default `http://localhost:8000`), **not** from the request's Host header, because a Host-derived URL can be poisoned to point at an attacker's domain.
+
+**Security properties:** 256-bit CSPRNG token, stored only as SHA-256; fixed 24h server-side expiry; bcrypt-hashed optional password; per-link lockout after 10 failed attempts (HTTP 429); invalid, expired and revoked links all return the same 404; response omits `owner_id` and internal `remediation_notes`; `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`; tokens and query strings redacted from access logs; links are deleted with their scan.
+
+**Assumptions:** "external stakeholder" means read-only access to one scan's core fields. Remediation notes are treated as internal. A link that has locked after too many wrong passwords is replaced by issuing a new one.
+
+---
+
+## Docker (Task 4)
 
 ```bash
-cd notify
-npm test
+# Build
+docker build -t vulntracker-api:local .
+
+# Run: secrets are injected at runtime, never baked into the image
+docker run --rm -p 8000:8000 \
+  --read-only --tmpfs /tmp --tmpfs /app/data:uid=10001,gid=10001 \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -e JWT_SECRET_KEY="$(openssl rand -base64 48)" \
+  -e PUBLIC_BASE_URL=http://localhost:8000 \
+  vulntracker-api:local
+
+curl http://localhost:8000/health
+docker inspect --format '{{.State.Health.Status}}' <container-id>   # → healthy
 ```
 
----
+Image properties: `python:3.11.18-slim-trixie` pinned by **digest**; multi-stage build; dependencies installed from a **hash-locked** `requirements.lock` (`--require-hashes`, wheels only); pip/setuptools removed from the runtime layer; runs as UID **10001** with a nologin shell; app code root-owned and read-only; `HEALTHCHECK` on `/health`; exec-form entrypoint; allow-list `.dockerignore`, so no `.git`, tests, `.env` or DB files reach the build context.
 
-## Your Tasks
+For persistent data, mount a volume at `/app/data` instead of tmpfs.
 
-### Task 1 — Extend the App _(~1–1.5 hrs)_
+## Infrastructure (Terraform → AWS EKS)
 
-Implement the **"Shared Report Link"** feature:
+`terraform/` deploys the API to an existing EKS cluster:
 
-> As a VulnTracker user, I want to share a specific scan result with an external stakeholder (e.g. a customer or auditor) via a unique link. The link must expire after **24 hours** and must support **optional password protection**.
+- **Secrets:** AWS Secrets Manager (CMK-encrypted) → **Secrets Store CSI driver** mounts them as tmpfs files. There is no Kubernetes Secret object and nothing in env vars or manifests; the app reads `*_FILE`. Terraform creates only the secret containers, so **values never enter state**. Pod identity is **IRSA**, scoped to `GetSecretValue` on exactly two ARNs, plus `kms:Decrypt` only via Secrets Manager.
+- **Network:** namespace-wide **default-deny** ingress and egress. API ingress is allowed only from the ingress-controller namespace on 8000. Egress is limited to cluster DNS and the notify service, which also blocks the cloud metadata endpoint. The Service is `ClusterIP`. Ingress is TLS-only (cert-manager) with rate limits and a 1 MB body cap.
+- **Workload hardening:** Pod Security Admission `restricted` enforced on the namespace; `runAsNonRoot`, UID 10001, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token, no service links; CPU, memory and ephemeral-storage requests and limits; liveness and readiness probes; PDB; image must be **digest-pinned** (enforced by variable validation).
 
-Add the following endpoints to the app:
-
-| Method | Path                     | Auth          | Description                                                                                                              |
-| ------ | ------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `POST` | `/scans/{scan_id}/share` | Bearer token  | Generate a share token for a scan. Accepts optional `password` in the request body. Returns `{ "share_url": "..." }`     |
-| `GET`  | `/share/{token}`         | None (public) | Return the scan data if the token is valid and not expired. If password-protected, require a `password` query parameter. |
-
-Implementation choices are yours. We will read and evaluate the code you write here — including the security properties of your implementation. For the `share_url` value, use the incoming request's host, or hard-code `http://localhost:8000` for the prototype — document whichever you choose.
-
----
-
-### Task 2 — Security Analysis _(~1.5 hrs)_
-
-#### 2a. Run the required scans
-
-You must run **all four** of the following scan categories. Select an appropriate open-source or free-tier tool for each — your tool choices are part of the evaluation.
-
-| Scan type                                      | What it covers                                                                         |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------- |
-| **Static Application Security Testing (SAST)** | Source code — identify insecure coding patterns, injection risks, hardcoded secrets    |
-| **Dependency / SCA vulnerability scan**        | Third-party packages — known CVEs in pinned dependencies                               |
-| **Container image scan**                       | The Docker image you build — OS packages, installed libraries, misconfigurations       |
-| **Infrastructure-as-Code (IaC) security scan** | Your Helm chart or Terraform — misconfigurations, insecure defaults, policy violations. Complete Task 4 first, then run this scan. |
-
-Save the raw JSON output of each tool to the `reports/` directory, named clearly by scan type:
-
-```
-reports/
-├── sast.<tool>.json
-├── sca.<tool>.json
-├── container.<tool>.json
-└── iac.<tool>.json
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # fill in cluster, OIDC, image digest, hostname
+terraform init && terraform plan
+# populate secret values out-of-band (never via Terraform):
+aws secretsmanager put-secret-value --secret-id "$(terraform output -raw jwt_secret_arn)" \
+  --secret-string "$(openssl rand -base64 48)"
 ```
 
-#### 2b. Prioritised findings
+Cluster prerequisites: Secrets Store CSI driver + AWS provider, a NetworkPolicy-enforcing CNI (VPC CNI network policies / Calico), ingress-nginx, cert-manager, and a `gp3-encrypted` StorageClass.
 
-Write a `docs/findings.md` with a table of security findings, sourced from your scans and your own manual review. For each finding:
+## CI / security gates
 
-- Tool and scan type that detected it (or "manual")
-- Severity (your assessment — justify it)
-- Business impact in the context of _this specific application_
-- Whether it is in the starter code or in your new feature
+| Job | Tools | Fails the build when |
+|---|---|---|
+| `test`, `test-notify` | pytest (36 tests), node:test (13 tests) | any test fails |
+| `sast` | Semgrep (registry rules + project rules), Bandit | Semgrep ERROR-severity result; Bandit High/High |
+| `sca` | pip-audit, npm audit | any known Python vuln; npm High/Critical |
+| `container-scan` | docker build + hardened smoke run + Trivy (vuln/secret/misconfig) | image fails to start or become healthy, not UID 10001, or fixable High/Critical CVE |
+| `iac-scan` | terraform fmt/validate, Checkov (Terraform + Dockerfile) | any failed check except the documented, time-boxed `CKV2_AWS_57` |
 
-**Do not copy-paste tool output.** We are evaluating your ability to interpret findings and apply business context to prioritisation — not your ability to run a command.
-
----
-
-### Task 3 — Remediate _(~1 hr)_
-
-- Fix **at least 3 critical or high severity findings** in code. Show the changes clearly (they will be visible in your git diff / PR).
-- At least one fix must be in the code you wrote in Task 1.
-- For findings you do not fix, document why in `docs/remediation-plan.md`: what is the residual risk, what effort would remediation require, and what compensating controls (if any) exist?
-
----
-
-### Task 4 — Containerisation and Deployment Artifacts _(~30–45 min)_
-
-#### Dockerfile (mandatory)
-
-Write a production-grade `Dockerfile` for the **Python FastAPI service** (`app/`). It must:
-
-- Use a minimal, pinned base image
-- Run as a non-root user
-- Include a `HEALTHCHECK`
-- Not embed secrets or credentials
-
-The container image must build successfully and the app must be reachable via `docker run`. Include build and run instructions in your README.
-
-#### Infrastructure
-
-Add either a `terraform/` or `helm/` directory (your choice) that could deploy this service to a Kubernetes cluster or cloud environment. Your deployment must:
-
-- Source secrets from a secrets manager (not hardcoded in manifests or env vars)
-- Restrict network ingress to only what is required
-- Define resource limits and security contexts
-
----
-
-### Task 5 — Executive Summary _(~30 min)_
-
-Write `docs/executive-summary.md` as if you are presenting to a CISO who has 5 minutes.
-
-Cover:
-
-1. The overall security posture of the application before and after your work
-2. The top 3 residual risks and the reason they were not fully remediated
-3. Your recommended next steps if this were a real production service
-
-No jargon. No tool names in the first paragraph. Your audience cares about business risk, not CVE numbers.
-
----
-
-## Submission
-
-Push your completed solution to your own GitHub repository and share the URL with us. Your repository must contain:
-
-```
-/
-├── app/                        # extended Python API code
-├── notify/                     # Node.js notification service (no changes required)
-├── Dockerfile                  # mandatory (may cover one or both services)
-├── reports/
-│   ├── sast.<tool>.json
-│   ├── sca.<tool>.json
-│   ├── container.<tool>.json
-│   └── iac.<tool>.json
-├── terraform/  OR  helm/
-├── docs/
-│   ├── findings.md
-│   ├── remediation-plan.md
-│   └── executive-summary.md
-├── tests/                      # updated if you added Python tests
-└── README.md                   # update with Docker build/run instructions
-```
-
-CI must pass (green) on your repo before submission.
-
----
-
-## What We Are Looking For
-
-We are not grading on volume. We are grading on judgment.
-
-- **Security depth**: Did you find the real issues? Did you prioritise them correctly for this application?
-- **Implementation security**: Does your new feature introduce, or avoid, new vulnerabilities?
-- **Remediation quality**: Are your fixes correct and complete? Are your deferral reasons honest?
-- **Deployment security**: Does your container and infrastructure configuration reflect real-world security practices?
-- **Communication**: Would a non-technical executive understand your summary?
-
-Good luck. If anything in the brief is ambiguous, document your assumption and proceed.
+All third-party actions are pinned to commit SHAs; the workflow token is `contents: read`; Dependabot covers pip, npm, Docker, Actions and Terraform. Each job uploads its JSON report as a build artifact named per the brief (`sast.semgrep.json`, `sca.pip-audit.json`, `container.trivy.json`, `iac.checkov.json`).

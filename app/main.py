@@ -275,7 +275,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     logger.info("Successful login user_id=%s", user.id)
     token = create_access_token({"sub": user.username})
-    return {"access_token": token, "token_type": "bearer"}  # nosec B105 - token type label, not a secret
+    return {"access_token": token, "token_type": "bearer"}
 
 
 # ---------------------------------------------------------------------------
