@@ -1,29 +1,71 @@
+const crypto = require('crypto');
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
 const { dispatch } = require('./dispatcher');
 const config = require('./config');
+const { validateWebhookUrl } = require('./urlPolicy');
+
+if (!config.API_KEY) {
+  // Fail closed: never run this service unauthenticated.
+  throw new Error('NOTIFY_API_KEY (or NOTIFY_API_KEY_FILE) must be set');
+}
 
 const app = express();
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '64kb' }));
+
+// Health is the only unauthenticated route (used by probes).
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', service: 'vulntracker-notify' });
+});
+
+// Bearer-token authentication for everything else (constant-time compare).
+const expectedKeyDigest = crypto.createHash('sha256').update(config.API_KEY).digest();
+app.use((req, res, next) => {
+  const header = req.get('authorization') || '';
+  const supplied = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const suppliedDigest = crypto.createHash('sha256').update(supplied).digest();
+  if (!supplied || !crypto.timingSafeEqual(suppliedDigest, expectedKeyDigest)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  next();
+});
 
 // In-memory webhook registry
 const webhooks = new Map();
+const ALLOWED_EVENTS = new Set(['scan.created', 'scan.updated']);
+
+// Copy only plain string/number/boolean values into a prototype-less object
+// (blocks __proto__ / constructor pollution and unbounded blobs).
+function sanitiseMetadata(metadata) {
+  const out = Object.create(null);
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return out;
+  for (const [k, v] of Object.entries(metadata).slice(0, 20)) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+    if (['string', 'number', 'boolean'].includes(typeof v)) out[k] = typeof v === 'string' ? v.slice(0, 256) : v;
+  }
+  return { ...out };
+}
 
 
 // Register a webhook endpoint to receive VulnTracker events
 app.post('/webhooks', (req, res) => {
-  const { url, events, metadata } = req.body;
+  const { url, events, metadata } = req.body || {};
 
-  if (!url) return res.status(400).json({ error: 'url is required' });
+  if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url is required' });
   if (!Array.isArray(events) || events.length === 0) {
     return res.status(400).json({ error: 'events must be a non-empty array' });
   }
+  if (!events.every(e => ALLOWED_EVENTS.has(e))) {
+    return res.status(400).json({ error: 'unknown event type' });
+  }
+  const urlError = validateWebhookUrl(url, { allowInsecure: config.ALLOW_INSECURE_WEBHOOKS });
+  if (urlError) return res.status(400).json({ error: urlError });
 
   const webhook = {
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     url,
     events,
-    metadata: Object.assign({}, metadata),
+    metadata: sanitiseMetadata(metadata),
     createdAt: new Date().toISOString(),
   };
 
@@ -49,9 +91,9 @@ app.delete('/webhooks/:id', (req, res) => {
 
 
 // Trigger event notifications — called by the Python API on scan create/update
-// Assumed to be reachable only from internal network; no authentication applied
+// Authenticated (bearer key) and additionally restricted by NetworkPolicy in Kubernetes
 app.post('/notify', async (req, res) => {
-  const { event, payload } = req.body;
+  const { event, payload } = req.body || {};
 
   if (!event || !payload) {
     return res.status(400).json({ error: 'event and payload are required' });
@@ -67,16 +109,13 @@ app.post('/notify', async (req, res) => {
 });
 
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'vulntracker-notify' });
-});
-
-
-// Global error handler
+// Global error handler - details stay in server logs, never in responses.
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: err.message, stack: err.stack });
+  const errorId = crypto.randomUUID();
+  console.error(`error_id=${errorId}`, err);
+  const status = err.status && err.status < 500 ? err.status : 500;
+  res.status(status).json({ error: status === 500 ? 'Internal server error' : 'Bad request', error_id: errorId });
 });
 
 
