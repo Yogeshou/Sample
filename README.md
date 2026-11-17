@@ -96,7 +96,7 @@ docker build -t vulntracker-api:local .
 
 # Run: secrets are injected at runtime, never baked into the image
 docker run --rm -p 8000:8000 \
-  --read-only --tmpfs /tmp --tmpfs /app/data:uid=10001,gid=10001 \
+  --read-only --tmpfs /tmp -v vtdata:/app/data \
   --cap-drop ALL --security-opt no-new-privileges \
   -e JWT_SECRET_KEY="$(openssl rand -base64 48)" \
   -e PUBLIC_BASE_URL=http://localhost:8000 \
@@ -108,7 +108,7 @@ docker inspect --format '{{.State.Health.Status}}' <container-id>   # → health
 
 Image properties: `python:3.11.18-slim-trixie` pinned by **digest**; multi-stage build; dependencies installed from a **hash-locked** `requirements.lock` (`--require-hashes`, wheels only); pip/setuptools removed from the runtime layer; runs as UID **10001** with a nologin shell; app code root-owned and read-only; `HEALTHCHECK` on `/health`; exec-form entrypoint; allow-list `.dockerignore`, so no `.git`, tests, `.env` or DB files reach the build context.
 
-For persistent data, mount a volume at `/app/data` instead of tmpfs.
+`/app/data` holds the SQLite file. The named volume `vtdata` inherits the image's `app`-owned directory, so the read-only container can still write its database.
 
 ## Infrastructure (Terraform → AWS EKS)
 
